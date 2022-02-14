@@ -1,8 +1,20 @@
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+// Call up the SPIFFS FLASH filing system this is part of the ESP Core
+//#define FS_NO_GLOBALS
+#include <FS.h>
+#include <SD.h>
 
-//OBD connection related
+//#ifdef ESP32
+//#include "SPIFFS.h" // ESP32 only
+//#endif
+
+// JPEG decoder library
+#include <JPEGDecoder.h>
+
+//TFT related
+#include <TFT_eSPI.h> // Graphics and font library for ST7735 driver chip
+#include <SPI.h>
+
+//OBD related
 #include "BluetoothSerial.h"
 #include "ELMduino.h"
 
@@ -10,25 +22,74 @@ BluetoothSerial SerialBT;
 #define ELM_PORT   SerialBT
 #define DEBUG_PORT Serial
 
+TFT_eSPI tft = TFT_eSPI();  // Invoke library, pins defined in User_Setup.h
 ELM327 myELM327;
 
 uint32_t oiltemp = 0;
+uint32_t old_oiltemp = 0;
 
-#define SCREEN_WIDTH 128 // OLED display width, in pixels
-#define SCREEN_HEIGHT 32 // OLED display height, in pixels
+float battvolt = 0;
+float old_battvolt = 0;
 
-#define OLED_RESET     4 // Reset pin # (or -1 if sharing Arduino reset pin)
-#define SCREEN_ADDRESS 0x3C
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+const long reqIntervalOil = 5000;
+const long reqIntervalBatt = 1500;
 
-#define LOGO_HEIGHT   16
-#define LOGO_WIDTH    16
+unsigned long previousMillis_Oil = 0;
+unsigned long previousMillis_Batt = 0;
 
+//####################################################################################################
+// Setup
+//####################################################################################################
+void setup(void) {
 
-void setup() {
+  // Set all chip selects high to avoid bus contention during initialisation of each peripheral
+  //digitalWrite(22, HIGH); // Touch controller chip select (if used)
+  digitalWrite(15, HIGH); // TFT screen chip select
+  digitalWrite( 5, HIGH); // SD card chips select, must use GPIO 5 (ESP32 SS)
 
-  // Initialize serial and Bluetooth connection
-  Serial.begin(115200);
+  Serial.begin(115000);
+  delay(10);
+
+  tft.begin();
+
+  if (!SD.begin()) {
+    Serial.println("Card Mount Failed");
+    return;
+  }
+  uint8_t cardType = SD.cardType();
+
+  if (cardType == CARD_NONE) {
+    Serial.println("No SD card attached");
+    return;
+  }
+
+  Serial.print("SD Card Type: ");
+  if (cardType == CARD_MMC) {
+    Serial.println("MMC");
+  } else if (cardType == CARD_SD) {
+    Serial.println("SDSC");
+  } else if (cardType == CARD_SDHC) {
+    Serial.println("SDHC");
+  } else {
+    Serial.println("UNKNOWN");
+  }
+
+  uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+  Serial.printf("SD Card Size: %lluMB\n", cardSize);
+
+  Serial.println("initialisation done.");
+
+  tft.setRotation(1);  // landscape
+  tft.fillScreen(TFT_BLACK);
+
+  drawSdJpeg("/fiestaST_01.jpg", 0 , 0);     // 240 x 320 image
+  //tft.setCursor(12, 8);
+  //drawSdJpeg("/fiestaST3.jpg", 0 , 0);     // 240 x 320 image
+  //delay(3000);
+
+  // Set the font colour to be yellow with no background, set to font 7
+  //tft.print("87");
+
   SerialBT.setPin("1234");
   ELM_PORT.begin("ArduHUD", true);
 
@@ -46,53 +107,263 @@ void setup() {
 
   //Serial.println("Connected to ELM327");
 
-  // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
-  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-    //Serial.println(F("SSD1306 allocation failed"));
-    for (;;); // Don't proceed, loop forever
-  }
+  //tft.fillScreen(TFT_BLACK);
+  //tft.setCursor(0, 0, 2);
+  //tft.setTextColor(TFT_WHITE); tft.setTextSize(1);
+  //tft.println(F("Engine Oil Temp:"));
 
-  // the library initializes this with an Adafruit splash screen.
-  display.display();
-  delay(2000); // Pause for 2 seconds
+  drawSdJpeg("/FiestaST_02.jpg", 0 , 0);
 
-  // Clear the buffer
-  display.clearDisplay();
-
-  delay(2000);
+  tft.setCursor(12, 8);
+  tft.setTextColor(TFT_YELLOW); tft.setTextFont(7);
+  //tft.setTextSize(3);
+  tft.print(oiltemp);
+  //tft.print(char(247)); tft.print("C");
 
 }
 
+//####################################################################################################
+// Main loop
+//####################################################################################################
 void loop() {
 
-  float tempOilTemp = myELM327.oilTemp();
+  unsigned long currentTime = millis();
 
-  if (myELM327.status == ELM_SUCCESS)
-  {
-    oiltemp = (uint32_t)tempOilTemp;
-    //Serial.print("Oiltemp: "); Serial.println(oiltemp);
+  if (currentTime - previousMillis_Oil >= reqIntervalOil) {
+    float tempOilTemp = myELM327.oilTemp();
+
+    if (myELM327.status == ELM_SUCCESS)
+    {
+      oiltemp = (uint32_t)tempOilTemp;
+      showEngOilTemp(oiltemp);
+      previousMillis_Oil = currentTime;
+    }
+    else
+    {
+      myELM327.printError();
+    }
   }
-  else
-    myELM327.printError();
 
-  showEngOilTemp(oiltemp);
+  if ( currentTime - previousMillis_Batt >= reqIntervalBatt) {
+    float battvolt = myELM327.ctrlModVoltage();
+    battvolt = int(battvolt*10);
+    battvolt = battvolt/10;
+
+    if (myELM327.status == ELM_SUCCESS) {
+      showBattVolt(battvolt);
+      previousMillis_Batt = currentTime;
+    }
+    else
+    {
+      myELM327.printError();
+    }
+  }
+
 }
 
+//while (1) yield(); // We must yield() to stop a watchdog timeout.
 
-void showEngOilTemp(uint32_t oiltemp) {
-  display.clearDisplay();
+uint32_t showEngOilTemp(uint32_t oiltemp) {
+  tft.setTextColor(TFT_YELLOW);
+  if (oiltemp != old_oiltemp)
+  {
+    tft.fillRect(0, 0, 85, 65, TFT_BLACK);
+    tft.setCursor(12, 8, 7);
+    if (oiltemp >= 75)
+    {
+      tft.fillRect(140, 20, 40, 20, TFT_GREEN);
+    }
+    else
+    {
+      tft.fillRect(140, 20, 40, 20, TFT_BLUE);
+    }
+    tft.print(oiltemp);
 
-  display.setTextSize(1);             // Normal 1:1 pixel scale
-  display.setTextColor(SSD1306_WHITE);        // Draw white text
-  display.setCursor(0, 0);            // Start at top-left corner
-  display.println(F("Engine Oil Temp:"));
-  display.println(F(" "));
+  }
+  old_oiltemp = oiltemp;
+  return old_oiltemp;
+}
 
-  display.setTextSize(2);             // Draw 2X-scale text
-  display.setTextColor(SSD1306_WHITE);
-  display.print(oiltemp);
-  display.print((char)247); display.print("C");
+float showBattVolt(float battvolt) {
+  tft.setTextColor(TFT_YELLOW);
+  if (battvolt != old_battvolt)
+  {
+    tft.fillRect(0, 91, 112, 70, TFT_BLACK);
+    tft.setCursor(0, 102, 7);
+    if (battvolt <= 13.4)
+    {
+      tft.setTextColor(TFT_RED);
+    }
+    tft.print(battvolt, 1);
 
-  display.display();
-  delay(5000);
+  }
+  old_battvolt = battvolt;
+  return old_battvolt;
+}
+
+//####################################################################################################
+// Draw a JPEG on the TFT pulled from SD Card
+//####################################################################################################
+// xpos, ypos is top left corner of plotted image
+void drawSdJpeg(const char *filename, int xpos, int ypos) {
+
+  // Open the named file (the Jpeg decoder library will close it)
+  File jpegFile = SD.open( filename, FILE_READ);  // or, file handle reference for SD library
+
+  if ( !jpegFile ) {
+    Serial.print("ERROR: File \""); Serial.print(filename); Serial.println ("\" not found!");
+    return;
+  }
+
+  Serial.println("===========================");
+  Serial.print("Drawing file: "); Serial.println(filename);
+  Serial.println("===========================");
+
+  // Use one of the following methods to initialise the decoder:
+  bool decoded = JpegDec.decodeSdFile(jpegFile);  // Pass the SD file handle to the decoder,
+  //bool decoded = JpegDec.decodeSdFile(filename);  // or pass the filename (String or character array)
+
+  if (decoded) {
+    // print information about the image to the serial port
+    jpegInfo();
+    // render the image onto the screen at given coordinates
+    jpegRender(xpos, ypos);
+  }
+  else {
+    Serial.println("Jpeg file format not supported!");
+  }
+}
+
+//####################################################################################################
+// Draw a JPEG on the TFT, images will be cropped on the right/bottom sides if they do not fit
+//####################################################################################################
+// This function assumes xpos,ypos is a valid screen coordinate. For convenience images that do not
+// fit totally on the screen are cropped to the nearest MCU size and may leave right/bottom borders.
+void jpegRender(int xpos, int ypos) {
+
+  //jpegInfo(); // Print information from the JPEG file (could comment this line out)
+
+  uint16_t *pImg;
+  uint16_t mcu_w = JpegDec.MCUWidth;
+  uint16_t mcu_h = JpegDec.MCUHeight;
+  uint32_t max_x = JpegDec.width;
+  uint32_t max_y = JpegDec.height;
+
+  bool swapBytes = tft.getSwapBytes();
+  tft.setSwapBytes(true);
+
+  // Jpeg images are draw as a set of image block (tiles) called Minimum Coding Units (MCUs)
+  // Typically these MCUs are 16x16 pixel blocks
+  // Determine the width and height of the right and bottom edge image blocks
+  uint32_t min_w = jpg_min(mcu_w, max_x % mcu_w);
+  uint32_t min_h = jpg_min(mcu_h, max_y % mcu_h);
+
+  // save the current image block size
+  uint32_t win_w = mcu_w;
+  uint32_t win_h = mcu_h;
+
+  // record the current time so we can measure how long it takes to draw an image
+  uint32_t drawTime = millis();
+
+  // save the coordinate of the right and bottom edges to assist image cropping
+  // to the screen size
+  max_x += xpos;
+  max_y += ypos;
+
+  // Fetch data from the file, decode and display
+  while (JpegDec.read()) {    // While there is more data in the file
+    pImg = JpegDec.pImage ;   // Decode a MCU (Minimum Coding Unit, typically a 8x8 or 16x16 pixel block)
+
+    // Calculate coordinates of top left corner of current MCU
+    int mcu_x = JpegDec.MCUx * mcu_w + xpos;
+    int mcu_y = JpegDec.MCUy * mcu_h + ypos;
+
+    // check if the image block size needs to be changed for the right edge
+    if (mcu_x + mcu_w <= max_x) win_w = mcu_w;
+    else win_w = min_w;
+
+    // check if the image block size needs to be changed for the bottom edge
+    if (mcu_y + mcu_h <= max_y) win_h = mcu_h;
+    else win_h = min_h;
+
+    // copy pixels into a contiguous block
+    if (win_w != mcu_w)
+    {
+      uint16_t *cImg;
+      int p = 0;
+      cImg = pImg + win_w;
+      for (int h = 1; h < win_h; h++)
+      {
+        p += mcu_w;
+        for (int w = 0; w < win_w; w++)
+        {
+          *cImg = *(pImg + w + p);
+          cImg++;
+        }
+      }
+    }
+
+    // calculate how many pixels must be drawn
+    uint32_t mcu_pixels = win_w * win_h;
+
+    // draw image MCU block only if it will fit on the screen
+    if (( mcu_x + win_w ) <= tft.width() && ( mcu_y + win_h ) <= tft.height())
+      tft.pushImage(mcu_x, mcu_y, win_w, win_h, pImg);
+    else if ( (mcu_y + win_h) >= tft.height())
+      JpegDec.abort(); // Image has run off bottom of screen so abort decoding
+  }
+
+  tft.setSwapBytes(swapBytes);
+
+  showTime(millis() - drawTime); // These lines are for sketch testing only
+}
+
+//####################################################################################################
+// Print image information to the serial port (optional)
+//####################################################################################################
+// JpegDec.decodeFile(...) or JpegDec.decodeArray(...) must be called before this info is available!
+void jpegInfo() {
+
+  // Print information extracted from the JPEG file
+  Serial.println("JPEG image info");
+  Serial.println("===============");
+  Serial.print("Width      :");
+  Serial.println(JpegDec.width);
+  Serial.print("Height     :");
+  Serial.println(JpegDec.height);
+  Serial.print("Components :");
+  Serial.println(JpegDec.comps);
+  Serial.print("MCU / row  :");
+  Serial.println(JpegDec.MCUSPerRow);
+  Serial.print("MCU / col  :");
+  Serial.println(JpegDec.MCUSPerCol);
+  Serial.print("Scan type  :");
+  Serial.println(JpegDec.scanType);
+  Serial.print("MCU width  :");
+  Serial.println(JpegDec.MCUWidth);
+  Serial.print("MCU height :");
+  Serial.println(JpegDec.MCUHeight);
+  Serial.println("===============");
+  Serial.println("");
+}
+
+//####################################################################################################
+// Show the execution time (optional)
+//####################################################################################################
+// WARNING: for UNO/AVR legacy reasons printing text to the screen with the Mega might not work for
+// sketch sizes greater than ~70KBytes because 16 bit address pointers are used in some libraries.
+
+// The Due will work fine with the HX8357_Due library.
+
+void showTime(uint32_t msTime) {
+  //tft.setCursor(0, 0);
+  //tft.setTextFont(1);
+  //tft.setTextSize(2);
+  //tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  //tft.print(F(" JPEG drawn in "));
+  //tft.print(msTime);
+  //tft.println(F(" ms "));
+  Serial.print(F(" JPEG drawn in "));
+  Serial.print(msTime);
+  Serial.println(F(" ms "));
 }
