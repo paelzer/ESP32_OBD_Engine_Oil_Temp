@@ -4,11 +4,8 @@ Reads engine oil temperature and battery voltage via ELM327 mini bluetooth scann
 It has been tested sucessfully with following setup:
 
 * Windows 10 x64
-
 * Arduino IDE 1.8.18
-
 * ESP32 D1 mini (other uC boards work as well with some modifications depending on the model)
-
 * OLED TFT ILI9341 display 2.8" 320x240px (red colored board version)
 
 ## Requires following extensions installed to the Arduino IDE:
