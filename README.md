@@ -12,9 +12,8 @@ It has been tested sucessfully with following setup:
 * OLED TFT ILI9341 display 2.8" 320x240px (red colored board version)
 
 ## Requires following extensions installed to the Arduino IDE:
-* Bodmer's "TFT_eSPI" library
-* Powerbroker2's "ELMDuino"
-
+* Bodmer's "TFT_eSPI" library (I used v2.3.70)
+* Powerbroker2's "ELMDuino" (I used 2.6.4)
 
 ## Required hardware components:
     ESP32 D1 mini
